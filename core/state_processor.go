@@ -17,12 +17,10 @@
 package core
 
 import (
-	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
-	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -57,39 +55,11 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
 func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
-	var (
-		receipts    types.Receipts
-		usedGas     = new(uint64)
-		header      = block.Header()
-		blockHash   = block.Hash()
-		blockNumber = block.Number()
-		allLogs     []*types.Log
-		gp          = new(GasPool).AddGas(block.GasLimit())
-	)
-	// Mutate the block and state according to any hard-fork specs
-	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
-		misc.ApplyDAOHardFork(statedb)
-	}
-	blockContext := NewEVMBlockContext(header, p.bc, nil)
-	vmenv := vm.NewEVM(blockContext, vm.TxContext{}, statedb, p.config, cfg)
-	// Iterate over and process the individual transactions
-	for i, tx := range block.Transactions() {
-		msg, err := tx.AsMessage(types.MakeSigner(p.config, header.Number), header.BaseFee)
-		if err != nil {
-			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
-		}
-		statedb.Prepare(tx.Hash(), i)
-		receipt, err := applyTransaction(msg, p.config, nil, gp, statedb, blockNumber, blockHash, tx, usedGas, vmenv)
-		if err != nil {
-			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
-		}
-		receipts = append(receipts, receipt)
-		allLogs = append(allLogs, receipt.Logs...)
-	}
-	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
-	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles())
+	// 创建并使用并行处理器
+	parallelProcessor := NewBlockParallelProcessor(p.config, p.bc, p.engine)
 
-	return receipts, allLogs, *usedGas, nil
+	// 并行处理区块内交易
+	return parallelProcessor.ProcessBlock(block, statedb, cfg)
 }
 
 func applyTransaction(msg types.Message, config *params.ChainConfig, author *common.Address, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM) (*types.Receipt, error) {

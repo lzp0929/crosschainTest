@@ -1,0 +1,51 @@
+MVCC Concurrent Test - Fixed Implementation
+====================================
+
+Start Time: 2025-02-26T13:28:49+08:00
+
+Initial contract state: address=0x1234567890123456789012345678901234567890, key=0x0000000000000000000000000000000000000000000000000000000000000001, value=999
+
+Transaction allocation details:
+TX 4: type=write, conflict_group=0, key=0x00000000, value=4
+TX 3: type=write, conflict_group=0, key=0x00000000, value=3
+TX 1: type=read, conflict_group=0, key=0x00000000
+TX 0: type=read, conflict_group=0, key=0x00000000
+TX 2: type=read, conflict_group=0, key=0x00000000
+TX 5: type=write, conflict_group=1, key=0x00000000, value=5
+TX 6: type=write, conflict_group=1, key=0x00000000, value=6
+TX 7: type=read, conflict_group=1, key=0x00000000
+TX 8: type=read, conflict_group=1, key=0x00000000
+TX 9: type=read, conflict_group=1, key=0x00000000
+TX 10: type=write, conflict_group=2, key=0x00000000, value=10
+TX 11: type=write, conflict_group=2, key=0x00000000, value=11
+TX 14: type=read, conflict_group=2, key=0x00000000
+TX 13: type=read, conflict_group=2, key=0x00000000
+TX 12: type=read, conflict_group=2, key=0x00000000
+TX 17: type=write, conflict_group=3, key=0x00000000, value=17
+TX 19: type=write, conflict_group=3, key=0x00000000, value=19
+TX 16: type=read, conflict_group=3, key=0x00000000
+TX 18: type=read, conflict_group=3, key=0x00000000
+TX 15: type=read, conflict_group=3, key=0x00000000
+
+Starting 5 worker threads to execute 20 transactions
+
+Worker 3: TX 1 (read) success, value=999, time=0ms, retry=1
+Worker 2: TX 2 (read) success, value=999, time=0ms, retry=1
+Worker 0: TX 0 (read) success, value=999, time=0ms, retry=1
+Worker 3: TX 4 (write) success, value=4, time=0ms, retry=1
+Worker 4: TX 3 (write) success, value=3, time=0ms, retry=1
+Worker 4: TX 9 (read) success, value=3, time=0ms, retry=1
+Worker 3: TX 8 (read) success, value=3, time=0ms, retry=1
+Worker 0: TX 7 (read) success, value=3, time=0ms, retry=1
+WARNING: Result collection timeout reached (5s)
+
+Execution Results:
+Total transactions: 20
+Successful transactions: 8
+Aborted transactions: 0
+Total retries: 0
+Write transactions: 2
+Read transactions: 6
+WARNING: Test timeout reached (5s)
+
+Final version history:

@@ -113,7 +113,7 @@ type EVM struct {
 	Config Config
 	// global (to this context) ethereum virtual machine
 	// used throughout the execution of the tx.
-	interpreter *EVMInterpreter
+	interpreter Interpreter
 	// abort is used to abort the EVM calling operations
 	// NOTE: must be set atomically
 	abort int32
@@ -121,6 +121,8 @@ type EVM struct {
 	// available gas is calculated in gasCall* according to the 63/64 rule and later
 	// applied in opCall*.
 	callGasTemp uint64
+	// 添加交易ID
+	TxIndex int
 }
 
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should
@@ -135,6 +137,24 @@ func NewEVM(blockCtx BlockContext, txCtx TxContext, statedb StateDB, chainConfig
 		chainRules:  chainConfig.Rules(blockCtx.BlockNumber, blockCtx.Random != nil),
 	}
 	evm.interpreter = NewEVMInterpreter(evm, config)
+	return evm
+}
+
+// NewEVMWithMVCC 修改EVM创建函数 (添加一个新的创建EVM的函数，保持向后兼容性)
+func NewEVMWithMVCC(blockCtx BlockContext, txCtx TxContext, statedb StateDB, chainConfig *params.ChainConfig, config Config, txIndex int) *EVM {
+	evm := &EVM{
+		Context:     blockCtx,
+		TxContext:   txCtx,
+		StateDB:     statedb,
+		chainConfig: chainConfig,
+		chainRules:  chainConfig.Rules(blockCtx.BlockNumber, blockCtx.Random != nil),
+		Config:      config,
+		TxIndex:     txIndex,
+	}
+
+	// 注意: 这里假设已定义了MVCCInterpreter
+	// evm.interpreter = NewMVCCInterpreter(evm, config, txIndex)
+
 	return evm
 }
 
@@ -157,7 +177,7 @@ func (evm *EVM) Cancelled() bool {
 }
 
 // Interpreter returns the current interpreter
-func (evm *EVM) Interpreter() *EVMInterpreter {
+func (evm *EVM) Interpreter() Interpreter {
 	return evm.interpreter
 }
 
@@ -513,3 +533,13 @@ func (evm *EVM) Create2(caller ContractRef, code []byte, gas uint64, endowment *
 
 // ChainConfig returns the environment's chain configuration
 func (evm *EVM) ChainConfig() *params.ChainConfig { return evm.chainConfig }
+
+// MakeMVCCAware 将普通EVM转换为MVCC感知的EVM
+func (evm *EVM) MakeMVCCAware(txIndex int) {
+	evm.TxIndex = txIndex
+
+	// 替换解释器为MVCC解释器
+	mvccInterpreter := NewMVCCInterpreter(evm, evm.Config, txIndex)
+	mvccInterpreter.ReplaceInstructions()
+	evm.interpreter = mvccInterpreter
+}

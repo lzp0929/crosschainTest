@@ -1,0 +1,90 @@
+MVCC Concurrent Test - 100 Transactions, 5 Threads
+====================================
+
+Start Time: 2025-02-26T13:34:07+08:00
+
+Initial contract state: address=0x1234567890123456789012345678901234567890, key=0x0000000000000000000000000000000000000000000000000000000000000001, value=999
+
+Transaction allocation details:
+TX 9: type=write, conflict_group=0, key=0x00000000, value=9
+TX 5: type=write, conflict_group=0, key=0x00000000, value=5
+TX 0: type=write, conflict_group=0, key=0x00000000, value=0
+TX 1: type=write, conflict_group=0, key=0x00000000, value=1
+TX 3: type=write, conflict_group=0, key=0x00000000, value=3
+TX 6: type=read, conflict_group=0, key=0x00000000
+TX 8: type=read, conflict_group=0, key=0x00000000
+TX 7: type=read, conflict_group=0, key=0x00000000
+TX 4: type=read, conflict_group=0, key=0x00000000
+TX 2: type=read, conflict_group=0, key=0x00000000
+TX 13: type=write, conflict_group=1, key=0x00000000, value=13
+TX 11: type=write, conflict_group=1, key=0x00000000, value=11
+TX 15: type=write, conflict_group=1, key=0x00000000, value=15
+TX 18: type=write, conflict_group=1, key=0x00000000, value=18
+TX 16: type=write, conflict_group=1, key=0x00000000, value=16
+TX 10: type=read, conflict_group=1, key=0x00000000
+TX 19: type=read, conflict_group=1, key=0x00000000
+TX 17: type=read, conflict_group=1, key=0x00000000
+TX 12: type=read, conflict_group=1, key=0x00000000
+TX 14: type=read, conflict_group=1, key=0x00000000
+TX 28: type=write, conflict_group=2, key=0x00000000, value=28
+TX 23: type=write, conflict_group=2, key=0x00000000, value=23
+TX 29: type=write, conflict_group=2, key=0x00000000, value=29
+TX 21: type=write, conflict_group=2, key=0x00000000, value=21
+TX 27: type=write, conflict_group=2, key=0x00000000, value=27
+TX 25: type=read, conflict_group=2, key=0x00000000
+TX 24: type=read, conflict_group=2, key=0x00000000
+TX 22: type=read, conflict_group=2, key=0x00000000
+TX 26: type=read, conflict_group=2, key=0x00000000
+TX 20: type=read, conflict_group=2, key=0x00000000
+TX 33: type=write, conflict_group=3, key=0x00000000, value=33
+TX 31: type=write, conflict_group=3, key=0x00000000, value=31
+TX 35: type=write, conflict_group=3, key=0x00000000, value=35
+TX 34: type=write, conflict_group=3, key=0x00000000, value=34
+TX 30: type=write, conflict_group=3, key=0x00000000, value=30
+TX 36: type=read, conflict_group=3, key=0x00000000
+TX 37: type=read, conflict_group=3, key=0x00000000
+TX 38: type=read, conflict_group=3, key=0x00000000
+TX 32: type=read, conflict_group=3, key=0x00000000
+TX 39: type=read, conflict_group=3, key=0x00000000
+TX 41: type=write, conflict_group=4, key=0x00000000, value=41
+TX 44: type=write, conflict_group=4, key=0x00000000, value=44
+TX 45: type=write, conflict_group=4, key=0x00000000, value=45
+TX 48: type=write, conflict_group=4, key=0x00000000, value=48
+TX 49: type=write, conflict_group=4, key=0x00000000, value=49
+TX 40: type=read, conflict_group=4, key=0x00000000
+TX 46: type=read, conflict_group=4, key=0x00000000
+TX 43: type=read, conflict_group=4, key=0x00000000
+TX 47: type=read, conflict_group=4, key=0x00000000
+TX 42: type=read, conflict_group=4, key=0x00000000
+
+Starting 5 worker threads to execute 50 transactions
+
+Worker 3: TX 2 (read) success, value=999, time=0ms, retry=1
+Worker 0: TX 4 (read) success, value=999, time=0ms, retry=1
+Worker 2: TX 1 (write) success, value=1, time=0ms, retry=1
+Worker 2: TX 7 (read) success, value=1, time=0ms, retry=1
+Worker 2: TX 8 (read) success, value=1, time=0ms, retry=1
+Worker 0: TX 6 (read) success, value=1, time=0ms, retry=1
+Worker 1: TX 0 (write) success, value=0, time=0ms, retry=1
+Worker 0: TX 10 (read) success, value=0, time=0ms, retry=1
+WARNING: Test timeout reached (10s)
+WARNING: Result collection timeout reached (10s)
+
+Execution Results:
+Total transactions: 50
+Successful transactions: 8
+Aborted transactions: 0
+Total retries: 0
+Write transactions: 2
+Read transactions: 6
+
+Final version history:
+WARNING: Timeout getting version history
+No version history
+
+MVCC rule validation:
+WARNING: Timeout getting aborted transactions list
+
+Aborted transactions: []
+
+Test completed!

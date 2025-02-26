@@ -1,0 +1,75 @@
+MVCC Concurrent Transaction Version Test
+======================================
+
+Initial contract state: Address=0x1234567890123456789012345678901234567890, Key=0x0000000000000000000000000000000000000000000000000000000000000001, Value=100
+
+Starting 4 worker threads to execute 4 transactions
+
+Transaction Execution Results:
+Transaction 0:
+  Read Value: 100
+  Write Value: 1000
+  Execution Success: true
+  Execution Time: 10 ms
+Transaction 1:
+  Read Value: 100
+  Write Value: 1001
+  Execution Success: true
+  Execution Time: 25 ms
+Transaction 2:
+  Read Value: 100
+  Write Value: 1002
+  Execution Success: true
+  Execution Time: 35 ms
+Transaction 3:
+  Read Value: 100
+  Write Value: 1003
+  Execution Success: true
+  Execution Time: 51 ms
+
+Multi-Version State Table Contents:
+  Number of versions: 4
+  Version 0:
+    Transaction Index: 0
+    Value: 1000
+    Is Aborted: false
+    Transactions that read this version: None
+  Version 1:
+    Transaction Index: 1
+    Value: 1001
+    Is Aborted: false
+    Transactions that read this version: None
+  Version 2:
+    Transaction Index: 2
+    Value: 1002
+    Is Aborted: false
+    Transactions that read this version: None
+  Version 3:
+    Transaction Index: 3
+    Value: 1003
+    Is Aborted: false
+    Transactions that read this version: None
+
+Aborted Transactions: []
+
+Multi-Version State Table Analysis:
+  Block Number: 0
+  Version History:
+  - Version 0:
+    Version Number (Transaction Index): 0
+    Value: 1000
+    Transactions that read this version: None
+  - Version 1:
+    Version Number (Transaction Index): 1
+    Value: 1001
+    Transactions that read this version: None
+  - Version 2:
+    Version Number (Transaction Index): 2
+    Value: 1002
+    Transactions that read this version: None
+  - Version 3:
+    Version Number (Transaction Index): 3
+    Value: 1003
+    Transactions that read this version: None
+
+Test Completed!

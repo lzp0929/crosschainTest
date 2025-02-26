@@ -1,0 +1,7 @@
+MVCC Conflict Detection Test
+==========================
+
+Initial contract state: Address=0x1234567890123456789012345678901234567890, Key=0x0000000000000000000000000000000000000000000000000000000000000001, Value=100
+
+Starting 5 worker threads with specific execution order to create conflicts
+

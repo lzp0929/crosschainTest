@@ -1,0 +1,76 @@
+MVCC Read-Write Pattern Test
+==========================
+
+Initial contract state: Address=0x1234567890123456789012345678901234567890, Key=0x0000000000000000000000000000000000000000000000000000000000000001, Value=100
+
+Starting 4 worker threads to execute 4 transactions in a read-write pattern
+
+Transaction Execution Results:
+Transaction 0 (Thread 1):
+  Type: write
+  Start Time: 14:20:41.937039
+  End Time: 14:20:41.952961
+  Read Value: 100
+  Write Value: 1000
+  Execution Success: true
+  Execution Time: 15 ms
+Transaction 1 (Thread 2):
+  Type: read
+  Start Time: 14:20:41.937039
+  End Time: 14:20:41.952961
+  Read Value: 100
+  Execution Success: true
+  Execution Time: 15 ms
+Transaction 2 (Thread 3):
+  Type: write
+  Start Time: 14:20:41.937039
+  End Time: 14:20:41.952961
+  Read Value: 100
+  Write Value: 1002
+  Execution Success: true
+  Execution Time: 15 ms
+Transaction 3 (Thread 4):
+  Type: read
+  Start Time: 14:20:41.937039
+  End Time: 14:20:41.968511
+  Read Value: 100
+  Execution Success: true
+  Execution Time: 31 ms
+
+Multi-Version State Table Contents:
+  Number of versions: 2
+  Version 0:
+    Transaction Index: 0
+    Value: 1000
+    Is Aborted: false
+    Transactions that read this version: None
+  Version 1:
+    Transaction Index: 2
+    Value: 1002
+    Is Aborted: false
+    Transactions that read this version: None
+
+Aborted Transactions: []
+
+Multi-Version State Table Analysis:
+  Block Number: 0
+  Version History:
+  - Version 0:
+    Version Number (Transaction Index): 0
+    Value: 1000
+    Is Aborted: false
+    Transactions that read this version: None
+  - Version 1:
+    Version Number (Transaction Index): 2
+    Value: 1002
+    Is Aborted: false
+    Transactions that read this version: None
+
+Execution Timeline Analysis:
+  Transaction execution order based on start times:
+  1. Transaction 0 (Thread 1, write) - Started at: 14:20:41.937039, Ended at: 14:20:41.952961
+  2. Transaction 1 (Thread 2, read) - Started at: 14:20:41.937039, Ended at: 14:20:41.952961
+  3. Transaction 2 (Thread 3, write) - Started at: 14:20:41.937039, Ended at: 14:20:41.952961
+  4. Transaction 3 (Thread 4, read) - Started at: 14:20:41.937039, Ended at: 14:20:41.968511
+
+Test Completed!
