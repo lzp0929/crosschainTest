@@ -14,11 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 )
 
-// TestMVCCComplexPattern tests 4 threads concurrently executing 8 transactions in a complex pattern
-// Thread 1: Tx0, Tx4 (both write)
-// Thread 2: Tx1, Tx5 (both read)
-// Thread 3: Tx2, Tx6 (both write)
-// Thread 4: Tx3, Tx7 (both read)
+// TestMVCCComplexPattern tests concurrent transaction execution with MVCC
 func TestMVCCComplexPattern(t *testing.T) {
 	// 设置更长的测试超时时间
 	if testing.Short() {
@@ -41,8 +37,7 @@ func TestMVCCComplexPattern(t *testing.T) {
 	stateDB, _ := state.New(common.Hash{}, state.NewDatabase(db), nil)
 
 	// 创建MVCC管理器，用于8个交易
-	txCount := 8
-	mvccManager := mvcc.NewMVCCStateManager(txCount)
+	mvccManager := mvcc.NewMVCCStateManager(0)
 
 	// 测试地址和键
 	contractAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -71,50 +66,63 @@ func TestMVCCComplexPattern(t *testing.T) {
 
 	// 定义交易类型（奇数索引是读交易，偶数索引是写交易）
 	txTypes := []string{
-		"write", // Tx0 - 线程1
-		"read",  // Tx1 - 线程2
-		"write", // Tx2 - 线程3
-		"read",  // Tx3 - 线程4
-		"write", // Tx4 - 线程1
-		"read",  // Tx5 - 线程2
-		"write", // Tx6 - 线程3
-		"read",  // Tx7 - 线程4
+		"write", // Tx0
+		"read",  // Tx1
+		"write", // Tx2
+		"read",  // Tx3
+		"write", // Tx4
+		"read",  // Tx5
+		"write", // Tx6
+		"read",  // Tx7
 	}
 
-	// 将线程映射到它们的交易
-	threadToTxs := map[int][]int{
-		1: {0, 4}, // 线程1 -> Tx0, Tx4
-		2: {1, 5}, // 线程2 -> Tx1, Tx5
-		3: {2, 6}, // 线程3 -> Tx2, Tx6
-		4: {3, 7}, // 线程4 -> Tx3, Tx7
+	// 创建优先级队列（使用通道模拟）
+	pendingTxs := make([]int, 8)
+	for i := 0; i < 8; i++ {
+		pendingTxs[i] = i
 	}
 
-	// 创建等待组和结果通道
+	// 创建结果通道和结果数组
+	resultsCh := make(chan txResult, 8)
+	results := make([]txResult, 8)
+
+	// 设置最大并行度
+	maxWorkers := 4 // 使用4个工作线程
 	var wg sync.WaitGroup
-	resultsCh := make(chan txResult, txCount)
 
-	// 添加完成标志通道，用于防止死锁
-	doneCh := make(chan struct{})
-	timeoutCh := time.After(20 * time.Second) // 设置20秒超时
+	// 创建互斥锁用于保护pendingTxs
+	var txMutex sync.Mutex
 
-	// 启动4个工作线程，每个执行2个交易
-	fmt.Fprintf(logFile, "启动4个工作线程执行8个交易的复杂模式\n")
-	fmt.Fprintf(logFile, "线程1: Tx0, Tx4 (都是写操作)\n")
-	fmt.Fprintf(logFile, "线程2: Tx1, Tx5 (都是读操作)\n")
-	fmt.Fprintf(logFile, "线程3: Tx2, Tx6 (都是写操作)\n")
-	fmt.Fprintf(logFile, "线程4: Tx3, Tx7 (都是读操作)\n\n")
+	// 启动工作线程
+	fmt.Fprintf(logFile, "启动%d个工作线程执行%d个交易\n", maxWorkers, 8)
+	fmt.Fprintf(logFile, "交易类型: 偶数索引为写操作，奇数索引为读操作\n\n")
 
-	// 启动4个工作线程
-	for threadID := 1; threadID <= 4; threadID++ {
+	for threadID := 1; threadID <= maxWorkers; threadID++ {
 		wg.Add(1)
 		go func(threadID int) {
 			defer wg.Done()
 
-			// 获取分配给此线程的交易
-			threadTxs := threadToTxs[threadID]
+			for {
+				// 获取下一个要执行的交易
+				txMutex.Lock()
+				if len(pendingTxs) == 0 {
+					txMutex.Unlock()
+					return
+				}
 
-			// 在此线程中顺序执行每个交易
-			for _, txIndex := range threadTxs {
+				// 获取最小序号的交易
+				minIndex := 0
+				for i := 1; i < len(pendingTxs); i++ {
+					if pendingTxs[i] < pendingTxs[minIndex] {
+						minIndex = i
+					}
+				}
+				txIndex := pendingTxs[minIndex]
+
+				// 从待执行列表中移除该交易
+				pendingTxs = append(pendingTxs[:minIndex], pendingTxs[minIndex+1:]...)
+				txMutex.Unlock()
+
 				// 记录开始时间
 				startTime := time.Now()
 
@@ -127,141 +135,66 @@ func TestMVCCComplexPattern(t *testing.T) {
 					success:   true,
 				}
 
-				// 1. 读操作（所有交易都需要先读取）
-				var readValue interface{}
-				var ok bool
-
-				// 添加超时机制防止死锁
-				readDone := make(chan bool, 1)
-				go func() {
-					readValue, ok = mvccManager.ReadStorageState(txIndex, contractAddr, storageKey, stateDB)
-					readDone <- true
-				}()
-
-				// 等待读取完成或超时
-				select {
-				case <-readDone:
-					// 读取成功，继续处理
-				case <-time.After(2 * time.Second):
-					// 读取超时，记录失败并继续
-					fmt.Fprintf(logFile, "交易 %d (线程 %d): 读取操作超时\n", txIndex, threadID)
-					result.success = false
-					result.endTime = time.Now()
-					result.executionMs = result.endTime.Sub(startTime).Milliseconds()
-					resultsCh <- result
-					continue
-				}
-
+				// 执行交易
+				readValue, ok := mvccManager.ReadStorageState(txIndex, contractAddr, storageKey, stateDB)
 				if !ok {
-					fmt.Fprintf(logFile, "交易 %d (线程 %d): 读取操作失败\n", txIndex, threadID)
 					result.success = false
 					result.endTime = time.Now()
 					result.executionMs = result.endTime.Sub(startTime).Milliseconds()
 					resultsCh <- result
+					// 执行完后等待1毫秒
+					time.Sleep(1 * time.Millisecond)
 					continue
 				}
 
 				readHash := readValue.(common.Hash)
 				result.readValue = readHash.Big().Int64()
 
-				// 模拟一些处理时间，基于交易索引的不同延迟
-				// 这创建了一个更真实的并发执行模式
-				time.Sleep(time.Duration(5*(txIndex%4+1)) * time.Millisecond)
-
-				// 2. 写操作（仅对写交易）
+				// 模拟处理时间（根据交易类型调整）
 				if result.txType == "write" {
-					result.writeValue = int64(1000 + txIndex) // 每个写交易写入不同的值
+					time.Sleep(10 * time.Millisecond) // 写操作耗时更长
+				} else {
+					time.Sleep(5 * time.Millisecond) // 读操作耗时较短
+				}
+
+				// 如果是写交易，执行写操作
+				if result.txType == "write" {
+					result.writeValue = int64(1000 + txIndex)
 					newValueHash := common.BigToHash(big.NewInt(result.writeValue))
-
-					// 添加超时机制防止死锁
-					writeDone := make(chan bool, 1)
-					var success bool
-
-					go func() {
-						success = mvccManager.WriteStorageState(txIndex, contractAddr, storageKey, newValueHash)
-						writeDone <- true
-					}()
-
-					// 等待写入完成或超时
-					select {
-					case <-writeDone:
-						// 写入完成，检查结果
-						if !success {
-							fmt.Fprintf(logFile, "交易 %d (线程 %d): 写入操作失败\n", txIndex, threadID)
-							result.success = false
-						}
-					case <-time.After(2 * time.Second):
-						// 写入超时
-						fmt.Fprintf(logFile, "交易 %d (线程 %d): 写入操作超时\n", txIndex, threadID)
+					success := mvccManager.WriteStorageState(txIndex, contractAddr, storageKey, newValueHash)
+					if !success {
 						result.success = false
 					}
 				}
 
-				// 记录结束时间和执行持续时间
+				// 记录结束时间和执行时间
 				result.endTime = time.Now()
 				result.executionMs = result.endTime.Sub(startTime).Milliseconds()
 
 				// 发送结果
 				resultsCh <- result
 
-				// 在同一线程中的交易之间添加小延迟
-				// 这使执行模式更有趣
-				if len(threadTxs) > 1 && txIndex == threadTxs[0] {
-					time.Sleep(10 * time.Millisecond)
-				}
+				// 执行完后等待1毫秒
+				time.Sleep(1 * time.Millisecond)
 			}
 		}(threadID)
 	}
 
-	// 等待所有工作线程完成或超时
+	// 等待所有工作线程完成
 	go func() {
 		wg.Wait()
 		close(resultsCh)
-		close(doneCh)
 	}()
 
-	// 收集结果或处理超时
-	results := make([]txResult, 0, txCount)
-
-	collectDone := false
-	for !collectDone {
-		select {
-		case result, ok := <-resultsCh:
-			if !ok {
-				collectDone = true
-				break
-			}
-			results = append(results, result)
-		case <-timeoutCh:
-			fmt.Fprintf(logFile, "测试执行超时，强制结束\n")
-			t.Log("测试执行超时，强制结束")
-			collectDone = true
-		case <-doneCh:
-			collectDone = true
-		}
-	}
-
-	// 按交易索引排序结果
-	sortedResults := make([]txResult, txCount)
-	for i := range sortedResults {
-		sortedResults[i].success = false // 默认为失败
-	}
-
-	for _, result := range results {
-		if result.txIndex >= 0 && result.txIndex < txCount {
-			sortedResults[result.txIndex] = result
-		}
+	// 收集结果
+	for result := range resultsCh {
+		results[result.txIndex] = result
 	}
 
 	// 输出交易执行结果
 	fmt.Fprintf(logFile, "交易执行结果:\n")
-	for i, result := range sortedResults {
+	for i, result := range results {
 		fmt.Fprintf(logFile, "交易 %d (线程 %d):\n", i, result.threadID)
-		if !result.success {
-			fmt.Fprintf(logFile, "  状态: 失败或未完成\n")
-			continue
-		}
-
 		fmt.Fprintf(logFile, "  类型: %s\n", result.txType)
 		fmt.Fprintf(logFile, "  开始时间: %s\n", result.startTime.Format("15:04:05.000000"))
 		fmt.Fprintf(logFile, "  结束时间: %s\n", result.endTime.Format("15:04:05.000000"))
@@ -275,26 +208,7 @@ func TestMVCCComplexPattern(t *testing.T) {
 
 	// 获取并显示多版本状态表内容
 	fmt.Fprintf(logFile, "\n多版本状态表内容:\n")
-
-	// 添加超时机制防止死锁
-	versionsDone := make(chan bool, 1)
-	var versions []mvcc.VersionedValue
-
-	go func() {
-		versions = mvccManager.GetVersions(contractAddr, storageKey)
-		versionsDone <- true
-	}()
-
-	// 等待获取版本完成或超时
-	select {
-	case <-versionsDone:
-		// 获取版本成功，继续处理
-	case <-time.After(2 * time.Second):
-		// 获取版本超时
-		fmt.Fprintf(logFile, "  获取多版本状态表超时\n")
-		versions = nil
-	}
-
+	versions := mvccManager.GetVersions(contractAddr, storageKey)
 	if versions == nil || len(versions) == 0 {
 		fmt.Fprintf(logFile, "  多版本状态表为空\n")
 	} else {
@@ -302,17 +216,13 @@ func TestMVCCComplexPattern(t *testing.T) {
 		for i, version := range versions {
 			fmt.Fprintf(logFile, "  版本 %d:\n", i)
 			fmt.Fprintf(logFile, "    交易索引: %d\n", version.TxIndex)
-
 			if version.Value != nil {
 				valueHash := version.Value.(common.Hash)
 				fmt.Fprintf(logFile, "    值: %d\n", valueHash.Big().Int64())
 			} else {
-				fmt.Fprintf(logFile, "    值: nil (已中止)\n")
+				fmt.Fprintf(logFile, "    值: nil\n")
 			}
-
 			fmt.Fprintf(logFile, "    是否已中止: %v\n", version.IsAborted)
-
-			// 显示读取者信息
 			if version.Readers != nil && len(version.Readers) > 0 {
 				fmt.Fprintf(logFile, "    读取此版本的交易: ")
 				for readerTx := range version.Readers {
@@ -326,66 +236,74 @@ func TestMVCCComplexPattern(t *testing.T) {
 	}
 
 	// 获取中止的交易
-	abortedDone := make(chan bool, 1)
-	var abortedTxs []int
+	abortedTxs := mvccManager.GetAbortedTransactions()
+	fmt.Fprintf(logFile, "\n中止的交易分析:\n")
+	if len(abortedTxs) == 0 {
+		fmt.Fprintf(logFile, "没有交易被中止\n")
+	} else {
+		fmt.Fprintf(logFile, "中止的交易列表: %v\n", abortedTxs)
+		fmt.Fprintf(logFile, "\n中止原因分析:\n")
 
-	go func() {
-		abortedTxs = mvccManager.GetAbortedTransactions()
-		abortedDone <- true
-	}()
+		// 分析每个被中止的交易
+		for _, txIndex := range abortedTxs {
+			fmt.Fprintf(logFile, "交易 %d 中止原因分析:\n", txIndex)
 
-	// 等待获取中止交易完成或超时
-	select {
-	case <-abortedDone:
-		// 获取中止交易成功，继续处理
-	case <-time.After(2 * time.Second):
-		// 获取中止交易超时
-		fmt.Fprintf(logFile, "  获取中止交易超时\n")
-		abortedTxs = nil
-	}
+			// 获取该交易的执行结果
+			tx := results[txIndex]
 
-	fmt.Fprintf(logFile, "\n中止的交易: %v\n", abortedTxs)
-
-	// 添加多版本状态表的详细分析
-	fmt.Fprintf(logFile, "\n多版本状态表分析:\n")
-	fmt.Fprintf(logFile, "  区块号: %d\n", mvccManager.GetBlockNumber())
-
-	// 分析版本历史
-	if len(versions) > 0 {
-		fmt.Fprintf(logFile, "  版本历史:\n")
-		for i, version := range versions {
-			fmt.Fprintf(logFile, "  - 版本 %d:\n", i)
-			fmt.Fprintf(logFile, "    版本号 (交易索引): %d\n", version.TxIndex)
-
-			if version.Value != nil {
-				valueHash := version.Value.(common.Hash)
-				fmt.Fprintf(logFile, "    值: %d\n", valueHash.Big().Int64())
-			} else {
-				fmt.Fprintf(logFile, "    值: nil (已中止)\n")
+			// 分析交易类型和读写值
+			fmt.Fprintf(logFile, "  - 交易类型: %s\n", tx.txType)
+			fmt.Fprintf(logFile, "  - 执行时间: %s\n", tx.startTime.Format("15:04:05.000000"))
+			fmt.Fprintf(logFile, "  - 读取的值: %d\n", tx.readValue)
+			if tx.txType == "write" {
+				fmt.Fprintf(logFile, "  - 尝试写入的值: %d\n", tx.writeValue)
 			}
 
-			fmt.Fprintf(logFile, "    是否已中止: %v\n", version.IsAborted)
+			// 分析依赖关系
+			fmt.Fprintf(logFile, "  - 可能的中止原因:\n")
 
-			// 显示读取者信息
-			fmt.Fprintf(logFile, "    读取此版本的交易: ")
-			if version.Readers != nil && len(version.Readers) > 0 {
-				for readerTx := range version.Readers {
-					fmt.Fprintf(logFile, "%d ", readerTx)
+			// 检查是否有更低序号的写入发生在该交易之后
+			for _, otherTx := range results {
+				if otherTx.txType == "write" && otherTx.txIndex < txIndex &&
+					otherTx.startTime.Before(tx.endTime) && otherTx.success {
+					fmt.Fprintf(logFile, "    * 交易 %d 在此交易执行期间写入了新值 %d\n",
+						otherTx.txIndex, otherTx.writeValue)
 				}
-			} else {
-				fmt.Fprintf(logFile, "无")
 			}
-			fmt.Fprintf(logFile, "\n")
+
+			// 检查是否读取了已被覆盖的版本
+			versions := mvccManager.GetVersions(contractAddr, storageKey)
+			for _, version := range versions {
+				if version.TxIndex < txIndex {
+					for _, otherTx := range results {
+						if otherTx.txType == "write" && otherTx.txIndex < txIndex &&
+							otherTx.txIndex > version.TxIndex && otherTx.success {
+							fmt.Fprintf(logFile, "    * 读取了交易 %d 的旧版本，但该版本已被交易 %d 覆盖\n",
+								version.TxIndex, otherTx.txIndex)
+						}
+					}
+				}
+			}
+
+			// 检查是否有读取依赖被中止
+			for _, otherTxIndex := range abortedTxs {
+				if otherTxIndex < txIndex {
+					fmt.Fprintf(logFile, "    * 依赖的交易 %d 被中止\n", otherTxIndex)
+				}
+			}
 		}
 	}
+
+	// 将最终状态提交到合约状态
+	mvccManager.CommitToState(contractAddr, storageKey, stateDB)
+	finalState := stateDB.GetState(contractAddr, storageKey)
+	fmt.Fprintf(logFile, "\n合约最终状态: %d\n", finalState.Big().Int64())
 
 	// 添加执行时间线分析
 	fmt.Fprintf(logFile, "\n执行时间线分析:\n")
 	fmt.Fprintf(logFile, "  基于开始时间的交易执行顺序:\n")
-
-	// 创建结果副本用于时间线排序
 	var timelineResults []txResult
-	for _, result := range sortedResults {
+	for _, result := range results {
 		if result.success {
 			timelineResults = append(timelineResults, result)
 		}
@@ -409,41 +327,35 @@ func TestMVCCComplexPattern(t *testing.T) {
 
 	// 添加线程执行分析
 	fmt.Fprintf(logFile, "\n线程执行分析:\n")
-	for threadID := 1; threadID <= 4; threadID++ {
-		threadTxs := threadToTxs[threadID]
-		fmt.Fprintf(logFile, "  线程 %d 执行的交易: ", threadID)
-		for _, txIndex := range threadTxs {
-			fmt.Fprintf(logFile, "%d ", txIndex)
-		}
-		fmt.Fprintf(logFile, "\n")
+	threadStats := make(map[int]struct {
+		txCount    int
+		totalTime  int64
+		firstStart time.Time
+		lastEnd    time.Time
+	})
 
-		// 计算线程的总执行时间
-		var firstStart time.Time
-		var lastEnd time.Time
-		first := true
-		hasCompletedTx := false
-
-		for _, txIndex := range threadTxs {
-			result := sortedResults[txIndex]
-			if !result.success {
-				continue
-			}
-
-			hasCompletedTx = true
-			if first || result.startTime.Before(firstStart) {
-				firstStart = result.startTime
-				first = false
-			}
-			if result.endTime.After(lastEnd) {
-				lastEnd = result.endTime
-			}
+	for _, result := range results {
+		if !result.success {
+			continue
 		}
 
-		if hasCompletedTx {
-			totalTime := lastEnd.Sub(firstStart).Milliseconds()
-			fmt.Fprintf(logFile, "  线程 %d 总执行时间: %d ms\n", threadID, totalTime)
-		} else {
-			fmt.Fprintf(logFile, "  线程 %d 没有成功完成任何交易\n", threadID)
+		stats := threadStats[result.threadID]
+		stats.txCount++
+		if stats.txCount == 1 || result.startTime.Before(stats.firstStart) {
+			stats.firstStart = result.startTime
+		}
+		if result.endTime.After(stats.lastEnd) {
+			stats.lastEnd = result.endTime
+		}
+		threadStats[result.threadID] = stats
+	}
+
+	for threadID, stats := range threadStats {
+		if stats.txCount > 0 {
+			totalTime := stats.lastEnd.Sub(stats.firstStart).Milliseconds()
+			fmt.Fprintf(logFile, "  线程 %d:\n", threadID)
+			fmt.Fprintf(logFile, "    执行交易数: %d\n", stats.txCount)
+			fmt.Fprintf(logFile, "    总执行时间: %d ms\n", totalTime)
 		}
 	}
 

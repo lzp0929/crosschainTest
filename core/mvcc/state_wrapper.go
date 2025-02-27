@@ -2,7 +2,6 @@ package mvcc
 
 import (
 	"math/big"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -21,15 +20,13 @@ type MVCCStateDB struct {
 	writeSet        map[common.Address]map[string]struct{}
 	storageReadSet  map[common.Address]map[common.Hash]struct{}
 	storageWriteSet map[common.Address]map[common.Hash]struct{}
-
-	mu sync.RWMutex
 }
 
 // NewMVCCStateDB 创建一个新的MVCC状态包装器
-func NewMVCCStateDB(baseState *state.StateDB, manager *MVCCStateManager, txIndex int) *MVCCStateDB {
+func NewMVCCStateDB(baseState *state.StateDB, txIndex int) *MVCCStateDB {
 	return &MVCCStateDB{
+		mvccManager:     NewMVCCStateManager(0), // 使用0作为区块号
 		baseState:       baseState,
-		mvccManager:     manager,
 		txIndex:         txIndex,
 		readSet:         make(map[common.Address]map[string]struct{}),
 		writeSet:        make(map[common.Address]map[string]struct{}),
@@ -42,98 +39,60 @@ func NewMVCCStateDB(baseState *state.StateDB, manager *MVCCStateManager, txIndex
 
 // GetBalance 获取账户余额
 func (s *MVCCStateDB) GetBalance(addr common.Address) *big.Int {
-	// 记录读操作
-	s.trackRead(addr, "balance")
-
-	// 从MVCC管理器读取
 	value, success := s.mvccManager.ReadAddressState(s.txIndex, addr, "balance", s.baseState)
 	if !success {
-		// 读取失败，返回零值
+		s.mvccManager.AbortTransaction(s.txIndex)
 		return big.NewInt(0)
 	}
-
-	if value == nil {
-		return big.NewInt(0)
-	}
-
 	return value.(*big.Int)
 }
 
 // SetBalance 设置账户余额
 func (s *MVCCStateDB) SetBalance(addr common.Address, amount *big.Int) {
-	// 记录写操作
-	s.trackWrite(addr, "balance")
-
-	// 写入MVCC管理器
-	s.mvccManager.WriteAddressState(s.txIndex, addr, "balance", amount)
+	success := s.mvccManager.WriteAddressState(s.txIndex, addr, "balance", amount)
+	if !success {
+		s.mvccManager.AbortTransaction(s.txIndex)
+	}
 }
 
 // GetNonce 获取账户Nonce
 func (s *MVCCStateDB) GetNonce(addr common.Address) uint64 {
-	// 记录读操作
-	s.trackRead(addr, "nonce")
-
-	// 从MVCC管理器读取
 	value, success := s.mvccManager.ReadAddressState(s.txIndex, addr, "nonce", s.baseState)
 	if !success {
+		s.mvccManager.AbortTransaction(s.txIndex)
 		return 0
 	}
-
-	if value == nil {
-		return 0
-	}
-
 	return value.(uint64)
 }
 
 // SetNonce 设置账户Nonce
 func (s *MVCCStateDB) SetNonce(addr common.Address, nonce uint64) {
-	// 记录写操作
-	s.trackWrite(addr, "nonce")
-
-	// 写入MVCC管理器
-	s.mvccManager.WriteAddressState(s.txIndex, addr, "nonce", nonce)
+	success := s.mvccManager.WriteAddressState(s.txIndex, addr, "nonce", nonce)
+	if !success {
+		s.mvccManager.AbortTransaction(s.txIndex)
+	}
 }
 
 // GetState 获取合约存储
 func (s *MVCCStateDB) GetState(addr common.Address, key common.Hash) common.Hash {
-	// 记录读操作
-	s.trackStorageRead(addr, key)
-
-	// 从MVCC管理器读取
 	value, success := s.mvccManager.ReadStorageState(s.txIndex, addr, key, s.baseState)
 	if !success {
-		// 读取失败意味着依赖的交易已中止，此交易也应中止
-		// 记录此交易为中止状态
 		s.mvccManager.AbortTransaction(s.txIndex)
 		return common.Hash{}
 	}
-
-	if value == nil {
-		return common.Hash{}
-	}
-
 	return value.(common.Hash)
 }
 
 // SetState 设置合约存储
 func (s *MVCCStateDB) SetState(addr common.Address, key common.Hash, value common.Hash) {
-	// 记录存储写操作
-	s.trackStorageWrite(addr, key)
-
-	// 写入MVCC管理器
 	success := s.mvccManager.WriteStorageState(s.txIndex, addr, key, value)
 	if !success {
-		// 写入失败意味着检测到冲突，此交易应中止
 		s.mvccManager.AbortTransaction(s.txIndex)
 	}
 }
 
 // 跟踪读操作
 func (s *MVCCStateDB) trackRead(addr common.Address, field string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.readSet[addr] == nil {
 		s.readSet[addr] = make(map[string]struct{})
 	}
@@ -142,9 +101,6 @@ func (s *MVCCStateDB) trackRead(addr common.Address, field string) {
 
 // 跟踪写操作
 func (s *MVCCStateDB) trackWrite(addr common.Address, field string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.writeSet[addr] == nil {
 		s.writeSet[addr] = make(map[string]struct{})
 	}
@@ -153,9 +109,6 @@ func (s *MVCCStateDB) trackWrite(addr common.Address, field string) {
 
 // 跟踪存储读操作
 func (s *MVCCStateDB) trackStorageRead(addr common.Address, key common.Hash) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.storageReadSet[addr] == nil {
 		s.storageReadSet[addr] = make(map[common.Hash]struct{})
 	}
@@ -164,9 +117,6 @@ func (s *MVCCStateDB) trackStorageRead(addr common.Address, key common.Hash) {
 
 // 跟踪存储写操作
 func (s *MVCCStateDB) trackStorageWrite(addr common.Address, key common.Hash) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.storageWriteSet[addr] == nil {
 		s.storageWriteSet[addr] = make(map[common.Hash]struct{})
 	}
@@ -272,11 +222,11 @@ func (s *MVCCStateDB) ForEachStorage(addr common.Address, cb func(key, value com
 // GetCode returns the contract code associated with this object
 func (s *MVCCStateDB) GetCode(addr common.Address) []byte {
 	s.trackRead(addr, "code")
-	value, success := s.mvccManager.ReadAddressState(s.txIndex, addr, "code", s.baseState)
-	if !success || value == nil {
+	hash := s.GetCodeHash(addr)
+	if hash == (common.Hash{}) {
 		return nil
 	}
-	return value.([]byte)
+	return s.baseState.GetCode(addr)
 }
 
 // GetCodeSize returns the size of the contract code
@@ -286,30 +236,28 @@ func (s *MVCCStateDB) GetCodeSize(addr common.Address) int {
 
 // GetCodeHash returns the code hash
 func (s *MVCCStateDB) GetCodeHash(addr common.Address) common.Hash {
-	s.trackRead(addr, "codehash")
-	return s.baseState.GetCodeHash(addr)
+	value, success := s.mvccManager.ReadAddressState(s.txIndex, addr, "codehash", s.baseState)
+	if !success {
+		s.mvccManager.AbortTransaction(s.txIndex)
+		return common.Hash{}
+	}
+	return value.(common.Hash)
 }
 
 // SetCode sets the contract code
 func (s *MVCCStateDB) SetCode(addr common.Address, code []byte) {
 	s.trackWrite(addr, "code")
-	s.mvccManager.WriteAddressState(s.txIndex, addr, "code", code)
+	s.baseState.SetCode(addr, code)
 }
 
 // GetCommittedState returns the committed state of the given account
 func (s *MVCCStateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
-	s.trackStorageRead(addr, hash)
 	return s.baseState.GetCommittedState(addr, hash)
 }
 
 // HasSuicided returns whether the given account has been suicided
 func (s *MVCCStateDB) HasSuicided(addr common.Address) bool {
-	s.trackRead(addr, "suicided")
-	value, success := s.mvccManager.ReadAddressState(s.txIndex, addr, "suicided", s.baseState)
-	if !success || value == nil {
-		return false
-	}
-	return value.(bool)
+	return s.GetSuicided(addr)
 }
 
 // Suicide marks the given account as suicided
@@ -376,9 +324,6 @@ func (db *CustomStateDB) SetState(addr common.Address, key common.Hash, value co
 
 // ReadStorageState 读取存储状态，支持MVCC
 func (w *MVCCStateDB) ReadStorageState(addr common.Address, key common.Hash, txIndex int) common.Hash {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-
 	// 从MVCC管理器读取
 	value, success := w.mvccManager.ReadStorageState(txIndex, addr, key, w.baseState)
 	if !success {
@@ -398,4 +343,24 @@ func (w *MVCCStateDB) ReadStorageState(addr common.Address, key common.Hash, txI
 	}
 
 	return value.(common.Hash)
+}
+
+func (s *MVCCStateDB) GetSuicided(addr common.Address) bool {
+	value, success := s.mvccManager.ReadAddressState(s.txIndex, addr, "suicided", s.baseState)
+	if !success {
+		s.mvccManager.AbortTransaction(s.txIndex)
+		return false
+	}
+	return value.(bool)
+}
+
+func (s *MVCCStateDB) SetSuicided(addr common.Address, suicided bool) {
+	success := s.mvccManager.WriteAddressState(s.txIndex, addr, "suicided", suicided)
+	if !success {
+		s.mvccManager.AbortTransaction(s.txIndex)
+	}
+}
+
+func (s *MVCCStateDB) GetMVCCManager() *MVCCStateManager {
+	return s.mvccManager
 }

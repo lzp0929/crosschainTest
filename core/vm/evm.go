@@ -84,6 +84,22 @@ type TxContext struct {
 	// Message information
 	Origin   common.Address // Provides information for ORIGIN
 	GasPrice *big.Int       // Provides information for GASPRICE
+	TxHash   common.Hash    // Provides information for TXHASH
+	BlockNum uint64         // Provides information for NUMBER
+	Time     uint64         // Provides information for TIME
+	BaseFee  *big.Int       // Provides information for BASEFEE
+}
+
+// NewTxContext creates a new transaction context
+func NewTxContext(origin common.Address, txHash common.Hash, blockNum uint64, time uint64, baseFee *big.Int) TxContext {
+	return TxContext{
+		Origin:   origin,
+		GasPrice: new(big.Int),
+		TxHash:   txHash,
+		BlockNum: blockNum,
+		Time:     time,
+		BaseFee:  baseFee,
+	}
 }
 
 // EVM is the Ethereum Virtual Machine base object and provides
