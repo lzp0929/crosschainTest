@@ -1,6 +1,7 @@
 package mvcc
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -63,26 +64,41 @@ func (m *MVCCStateManager) ReadStorageState(txIndex int, addr common.Address, ke
 	m.mu.Unlock()
 
 	if isAborted {
+		log.Debug("交易已中止，读取失败",
+			"txIndex", txIndex)
 		return nil, false
 	}
 
 	// 尝试从多版本状态表中读取
 	var latestVersion *VersionedValue
+	var maxTxIndex = -1
 
 	m.mu.Lock()
 	if m.storageStates[addr] != nil && m.storageStates[addr][key] != nil {
 		versions := m.storageStates[addr][key]
 
-		// 查找最新的可见版本（小于当前交易索引的最大版本）
+		// 查找小于当前交易索引的最大版本（确保读取最新可见版本）
 		for i := len(versions) - 1; i >= 0; i-- {
 			version := versions[i]
-			if version.TxIndex < txIndex && !version.IsAborted {
+			if version.TxIndex < txIndex && !version.IsAborted && version.TxIndex > maxTxIndex {
 				latestVersion = &versions[i]
+				maxTxIndex = version.TxIndex
 				break
 			}
 		}
 
 		if latestVersion != nil {
+			// 检查版本是否有效（值不为nil）
+			if latestVersion.Value == nil {
+				log.Debug("读取到已中止交易的版本，跳过",
+					"reader", txIndex,
+					"writer", latestVersion.TxIndex,
+					"addr", addr.Hex(),
+					"key", key.Hex())
+				m.mu.Unlock()
+				return nil, false
+			}
+
 			// 记录读依赖
 			if m.readDependencies[txIndex] == nil {
 				m.readDependencies[txIndex] = make(map[int]struct{})
@@ -94,6 +110,11 @@ func (m *MVCCStateManager) ReadStorageState(txIndex int, addr common.Address, ke
 				latestVersion.Readers = make(map[int]struct{})
 			}
 			latestVersion.Readers[txIndex] = struct{}{}
+
+			log.Debug("成功读取版本",
+				"reader", txIndex,
+				"writer", latestVersion.TxIndex,
+				"value", latestVersion.Value)
 		}
 	}
 	m.mu.Unlock()
@@ -104,6 +125,12 @@ func (m *MVCCStateManager) ReadStorageState(txIndex int, addr common.Address, ke
 
 	// 如果没有找到合适的版本，从基础状态读取
 	baseValue := baseState.GetState(addr, key)
+
+	log.Debug("从基础状态读取",
+		"txIndex", txIndex,
+		"addr", addr.Hex(),
+		"key", key.Hex(),
+		"value", baseValue)
 
 	// 记录对基础状态的读取依赖（使用-1表示基础状态）
 	m.mu.Lock()
@@ -124,15 +151,9 @@ func (m *MVCCStateManager) WriteStorageState(txIndex int, addr common.Address, k
 	m.mu.Unlock()
 
 	if isAborted {
+		log.Debug("交易已中止，写入失败",
+			"txIndex", txIndex)
 		return false
-	}
-
-	// 创建新版本
-	newVersion := VersionedValue{
-		TxIndex:   txIndex,
-		Value:     value,
-		IsAborted: false,
-		Readers:   make(map[int]struct{}),
 	}
 
 	m.mu.Lock()
@@ -146,6 +167,9 @@ func (m *MVCCStateManager) WriteStorageState(txIndex int, addr common.Address, k
 		m.storageStates[addr][key] = []VersionedValue{}
 	}
 
+	// 记录所有需要中止的交易
+	txsToAbort := make(map[int]struct{})
+
 	// 检查是否有高序号交易读取了旧版本
 	for readerTx := range m.readDependencies {
 		if readerTx > txIndex {
@@ -153,8 +177,8 @@ func (m *MVCCStateManager) WriteStorageState(txIndex int, addr common.Address, k
 			for depTx := range m.readDependencies[readerTx] {
 				if depTx < txIndex {
 					// 高序号交易读取了旧版本，需要中止该交易
-					m.AbortTransaction(readerTx)
-					log.Debug("中止高序号交易，因为它读取了旧版本",
+					txsToAbort[readerTx] = struct{}{}
+					log.Debug("标记高序号交易中止，因为它读取了旧版本",
 						"writer", txIndex,
 						"reader", readerTx,
 						"dependency", depTx)
@@ -163,23 +187,77 @@ func (m *MVCCStateManager) WriteStorageState(txIndex int, addr common.Address, k
 		}
 	}
 
-	// 检查是否有高序号交易已经读取了此地址和键的值
-	if m.storageStates[addr][key] != nil {
-		for _, version := range m.storageStates[addr][key] {
+	// 检查是否有交易读取了将被覆盖的版本
+	// 找到所有已存在的版本
+	existingVersions := m.storageStates[addr][key]
+
+	// 检查是否已存在该交易的版本
+	var existingVersionIndex = -1
+	for i, version := range existingVersions {
+		// 如果找到了该交易的版本
+		if version.TxIndex == txIndex {
+			existingVersionIndex = i
+		}
+
+		// 如果这个版本是当前交易要覆盖的（即版本号小于当前交易）
+		if version.TxIndex < txIndex {
+			// 检查所有读取了这个版本的交易
 			for readerTx := range version.Readers {
+				// 如果读取交易的序号大于当前交易，需要中止
 				if readerTx > txIndex {
-					// 高序号交易读取了此地址和键的值，需要中止该交易
-					m.AbortTransaction(readerTx)
-					log.Debug("中止高序号交易，因为它读取了将被覆盖的值",
+					txsToAbort[readerTx] = struct{}{}
+					log.Debug("标记读取交易中止，因为它读取了将被覆盖的版本",
 						"writer", txIndex,
-						"reader", readerTx)
+						"reader", readerTx,
+						"version", version.TxIndex)
 				}
 			}
 		}
 	}
 
-	// 添加新版本
-	m.storageStates[addr][key] = append(m.storageStates[addr][key], newVersion)
+	// 中止所有需要中止的交易
+	for txToAbort := range txsToAbort {
+		m.AbortTransaction(txToAbort)
+	}
+
+	// 如果中止了其他交易，可能需要重新检查当前交易是否已被中止
+	if len(txsToAbort) > 0 {
+		if m.IsTransactionAborted(txIndex) {
+			log.Debug("当前交易在中止其他交易过程中被中止",
+				"txIndex", txIndex)
+			return false
+		}
+	}
+
+	// 创建或更新版本
+	if existingVersionIndex >= 0 {
+		// 更新已存在的版本
+		existingVersions[existingVersionIndex].Value = value
+		existingVersions[existingVersionIndex].IsAborted = false
+
+		log.Debug("更新交易的已存在版本",
+			"txIndex", txIndex,
+			"addr", addr.Hex(),
+			"key", key.Hex(),
+			"value", value)
+	} else {
+		// 创建新版本
+		newVersion := VersionedValue{
+			TxIndex:   txIndex,
+			Value:     value,
+			IsAborted: false,
+			Readers:   make(map[int]struct{}),
+		}
+
+		// 添加新版本 - 确保新版本被添加到版本列表的末尾，使其对后续交易立即可见
+		m.storageStates[addr][key] = append(m.storageStates[addr][key], newVersion)
+
+		log.Debug("交易写入新版本",
+			"txIndex", txIndex,
+			"addr", addr.Hex(),
+			"key", key.Hex(),
+			"value", value)
+	}
 
 	// 标记交易为已提交
 	m.txStatus[txIndex] = "committed"
@@ -195,26 +273,41 @@ func (m *MVCCStateManager) ReadAddressState(txIndex int, addr common.Address, fi
 	m.mu.Unlock()
 
 	if isAborted {
+		log.Debug("交易已中止，读取失败",
+			"txIndex", txIndex)
 		return nil, false
 	}
 
 	// 尝试从多版本状态表中读取
 	var latestVersion *VersionedValue
+	var maxTxIndex = -1
 
 	m.mu.Lock()
 	if m.addressStates[addr] != nil && m.addressStates[addr][field] != nil {
 		versions := m.addressStates[addr][field]
 
-		// 查找最新的可见版本（小于当前交易索引的最大版本）
+		// 查找小于当前交易索引的最大版本（确保读取最新可见版本）
 		for i := len(versions) - 1; i >= 0; i-- {
 			version := versions[i]
-			if version.TxIndex < txIndex && !version.IsAborted {
+			if version.TxIndex < txIndex && !version.IsAborted && version.TxIndex > maxTxIndex {
 				latestVersion = &versions[i]
+				maxTxIndex = version.TxIndex
 				break
 			}
 		}
 
 		if latestVersion != nil {
+			// 检查版本是否有效（值不为nil）
+			if latestVersion.Value == nil {
+				log.Debug("读取到已中止交易的版本，跳过",
+					"reader", txIndex,
+					"writer", latestVersion.TxIndex,
+					"addr", addr.Hex(),
+					"field", field)
+				m.mu.Unlock()
+				return nil, false
+			}
+
 			// 记录读依赖
 			if m.readDependencies[txIndex] == nil {
 				m.readDependencies[txIndex] = make(map[int]struct{})
@@ -226,6 +319,12 @@ func (m *MVCCStateManager) ReadAddressState(txIndex int, addr common.Address, fi
 				latestVersion.Readers = make(map[int]struct{})
 			}
 			latestVersion.Readers[txIndex] = struct{}{}
+
+			log.Debug("成功读取版本",
+				"reader", txIndex,
+				"writer", latestVersion.TxIndex,
+				"field", field,
+				"value", latestVersion.Value)
 		}
 	}
 	m.mu.Unlock()
@@ -251,6 +350,12 @@ func (m *MVCCStateManager) ReadAddressState(txIndex int, addr common.Address, fi
 		return nil, false
 	}
 
+	log.Debug("从基础状态读取",
+		"txIndex", txIndex,
+		"addr", addr.Hex(),
+		"field", field,
+		"value", baseValue)
+
 	// 记录对基础状态的读取依赖（使用-1表示基础状态）
 	m.mu.Lock()
 	if m.readDependencies[txIndex] == nil {
@@ -270,15 +375,9 @@ func (m *MVCCStateManager) WriteAddressState(txIndex int, addr common.Address, f
 	m.mu.Unlock()
 
 	if isAborted {
+		log.Debug("交易已中止，写入失败",
+			"txIndex", txIndex)
 		return false
-	}
-
-	// 创建新版本
-	newVersion := VersionedValue{
-		TxIndex:   txIndex,
-		Value:     value,
-		IsAborted: false,
-		Readers:   make(map[int]struct{}),
 	}
 
 	m.mu.Lock()
@@ -292,6 +391,9 @@ func (m *MVCCStateManager) WriteAddressState(txIndex int, addr common.Address, f
 		m.addressStates[addr][field] = []VersionedValue{}
 	}
 
+	// 记录所有需要中止的交易
+	txsToAbort := make(map[int]struct{})
+
 	// 检查是否有高序号交易读取了旧版本
 	for readerTx := range m.readDependencies {
 		if readerTx > txIndex {
@@ -299,8 +401,8 @@ func (m *MVCCStateManager) WriteAddressState(txIndex int, addr common.Address, f
 			for depTx := range m.readDependencies[readerTx] {
 				if depTx < txIndex {
 					// 高序号交易读取了旧版本，需要中止该交易
-					m.AbortTransaction(readerTx)
-					log.Debug("中止高序号交易，因为它读取了旧版本",
+					txsToAbort[readerTx] = struct{}{}
+					log.Debug("标记高序号交易中止，因为它读取了旧版本",
 						"writer", txIndex,
 						"reader", readerTx,
 						"dependency", depTx)
@@ -309,23 +411,77 @@ func (m *MVCCStateManager) WriteAddressState(txIndex int, addr common.Address, f
 		}
 	}
 
-	// 检查是否有高序号交易已经读取了此地址和字段的值
-	if m.addressStates[addr][field] != nil {
-		for _, version := range m.addressStates[addr][field] {
+	// 检查是否有交易读取了将被覆盖的版本
+	// 找到所有已存在的版本
+	existingVersions := m.addressStates[addr][field]
+
+	// 检查是否已存在该交易的版本
+	var existingVersionIndex = -1
+	for i, version := range existingVersions {
+		// 如果找到了该交易的版本
+		if version.TxIndex == txIndex {
+			existingVersionIndex = i
+		}
+
+		// 如果这个版本是当前交易要覆盖的（即版本号小于当前交易）
+		if version.TxIndex < txIndex {
+			// 检查所有读取了这个版本的交易
 			for readerTx := range version.Readers {
+				// 如果读取交易的序号大于当前交易，需要中止
 				if readerTx > txIndex {
-					// 高序号交易读取了此地址和字段的值，需要中止该交易
-					m.AbortTransaction(readerTx)
-					log.Debug("中止高序号交易，因为它读取了将被覆盖的值",
+					txsToAbort[readerTx] = struct{}{}
+					log.Debug("标记读取交易中止，因为它读取了将被覆盖的版本",
 						"writer", txIndex,
-						"reader", readerTx)
+						"reader", readerTx,
+						"version", version.TxIndex)
 				}
 			}
 		}
 	}
 
-	// 添加新版本
-	m.addressStates[addr][field] = append(m.addressStates[addr][field], newVersion)
+	// 中止所有需要中止的交易
+	for txToAbort := range txsToAbort {
+		m.AbortTransaction(txToAbort)
+	}
+
+	// 如果中止了其他交易，可能需要重新检查当前交易是否已被中止
+	if len(txsToAbort) > 0 {
+		if m.IsTransactionAborted(txIndex) {
+			log.Debug("当前交易在中止其他交易过程中被中止",
+				"txIndex", txIndex)
+			return false
+		}
+	}
+
+	// 创建或更新版本
+	if existingVersionIndex >= 0 {
+		// 更新已存在的版本
+		existingVersions[existingVersionIndex].Value = value
+		existingVersions[existingVersionIndex].IsAborted = false
+
+		log.Debug("更新交易的已存在版本",
+			"txIndex", txIndex,
+			"addr", addr.Hex(),
+			"field", field,
+			"value", value)
+	} else {
+		// 创建新版本
+		newVersion := VersionedValue{
+			TxIndex:   txIndex,
+			Value:     value,
+			IsAborted: false,
+			Readers:   make(map[int]struct{}),
+		}
+
+		// 添加新版本 - 确保新版本被添加到版本列表的末尾，使其对后续交易立即可见
+		m.addressStates[addr][field] = append(m.addressStates[addr][field], newVersion)
+
+		log.Debug("交易写入新版本",
+			"txIndex", txIndex,
+			"addr", addr.Hex(),
+			"field", field,
+			"value", value)
+	}
 
 	// 标记交易为已提交
 	m.txStatus[txIndex] = "committed"
@@ -341,8 +497,48 @@ func (m *MVCCStateManager) IsTransactionAborted(txIndex int) bool {
 
 // AbortTransaction 中止交易
 func (m *MVCCStateManager) AbortTransaction(txIndex int) {
+	// 如果交易已经被中止，则直接返回
+	if _, exists := m.abortedTxs[txIndex]; exists {
+		return
+	}
+
 	m.abortedTxs[txIndex] = struct{}{}
 	m.txStatus[txIndex] = "aborted"
+
+	// 标记该交易在多版本状态表中的所有写入版本为已中止
+	// 遍历地址状态表
+	for addr, fields := range m.addressStates {
+		for field, versions := range fields {
+			for i, version := range versions {
+				if version.TxIndex == txIndex {
+					// 标记为已中止并将值设置为nil
+					versions[i].IsAborted = true
+					versions[i].Value = nil
+					log.Debug("标记地址状态版本为已中止并清除值",
+						"txIndex", txIndex,
+						"addr", addr.Hex(),
+						"field", field)
+				}
+			}
+		}
+	}
+
+	// 遍历存储状态表
+	for addr, keys := range m.storageStates {
+		for key, versions := range keys {
+			for i, version := range versions {
+				if version.TxIndex == txIndex {
+					// 标记为已中止并将值设置为nil
+					versions[i].IsAborted = true
+					versions[i].Value = nil
+					log.Debug("标记存储状态版本为已中止并清除值",
+						"txIndex", txIndex,
+						"addr", addr.Hex(),
+						"key", key.Hex())
+				}
+			}
+		}
+	}
 
 	// 递归中止依赖于此交易的其他交易
 	for depTx := range m.readDependencies {
@@ -365,15 +561,23 @@ func (m *MVCCStateManager) GetVersions(addr common.Address, key common.Hash) []V
 	return m.storageStates[addr][key]
 }
 
-// GetAbortedTransactions 获取所有中止的交易
+// GetAbortedTransactions 获取所有被中止的交易
 func (m *MVCCStateManager) GetAbortedTransactions() []int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var abortedTxs []int
+	abortedTxs := make([]int, 0, len(m.abortedTxs))
 	for tx := range m.abortedTxs {
 		abortedTxs = append(abortedTxs, tx)
 	}
+
+	// 按交易索引排序
+	sort.Ints(abortedTxs)
+
+	log.Debug("获取被中止的交易列表",
+		"count", len(abortedTxs),
+		"txs", abortedTxs)
+
 	return abortedTxs
 }
 
@@ -412,4 +616,22 @@ func (m *MVCCStateManager) CommitToState(addr common.Address, key common.Hash, s
 	if latestValue != nil {
 		stateDB.SetState(addr, key, latestValue.(common.Hash))
 	}
+}
+
+// ClearAbortedStatus 清除交易的中止状态，用于重新执行
+func (m *MVCCStateManager) ClearAbortedStatus(txIndex int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 从中止交易集合中移除
+	delete(m.abortedTxs, txIndex)
+
+	// 更新交易状态
+	delete(m.txStatus, txIndex)
+
+	// 清除读依赖关系
+	delete(m.readDependencies, txIndex)
+
+	log.Debug("清除交易中止状态",
+		"txIndex", txIndex)
 }
