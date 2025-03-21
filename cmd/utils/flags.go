@@ -977,6 +977,13 @@ var (
 		Value:    metrics.DefaultConfig.InfluxDBOrganization,
 		Category: flags.MetricsCategory,
 	}
+
+	// MVCC 相关标志
+	MVCCEnabledFlag = &cli.BoolFlag{
+		Name:     "mvcc",
+		Usage:    "启用MVCC并发执行交易",
+		Category: flags.EthCategory,
+	}
 )
 
 var (
@@ -1749,6 +1756,14 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	setRequiredBlocks(ctx, cfg)
 	setLes(ctx, cfg)
 
+	// 设置MVCC选项
+	if ctx.IsSet(MVCCEnabledFlag.Name) {
+		cfg.EnableMVCC = ctx.Bool(MVCCEnabledFlag.Name)
+		if cfg.EnableMVCC {
+			log.Info("启用MVCC并发交易执行")
+		}
+	}
+
 	// Cap the cache allowance and tune the garbage collector
 	mem, err := gopsutil.VirtualMemory()
 	if err == nil {
@@ -1988,6 +2003,11 @@ func SetDNSDiscoveryDefaults(cfg *ethconfig.Config, genesis common.Hash) {
 // The second return value is the full node instance, which may be nil if the
 // node is running as a light client.
 func RegisterEthService(stack *node.Node, cfg *ethconfig.Config) (ethapi.Backend, *eth.Ethereum) {
+	// 输出MVCC状态
+	if cfg.EnableMVCC {
+		log.Info("将使用MVCC并发执行交易", "启用状态", cfg.EnableMVCC)
+	}
+
 	if cfg.SyncMode == downloader.LightSync {
 		backend, err := les.New(stack, cfg)
 		if err != nil {

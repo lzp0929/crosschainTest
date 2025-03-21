@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -91,17 +92,63 @@ func (p *ParallelProcessor) processTransaction(tx *types.Transaction, mvccState 
 }
 
 func ApplyTransactionWithMVCC(config *params.ChainConfig, bc ChainContext, author *common.Address, gp *GasPool, statedb *mvcc.MVCCStateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, error) {
-	// 这里是一个简化的交易应用逻辑
-	// 在实际实现中，需要处理更多细节
+	// 获取MVCC管理器
+	mvccManager := statedb.GetMVCCManager()
+	txIndex := statedb.GetTxIndex()
 
-	// 创建收据
-	receipt := &types.Receipt{
-		Status:            types.ReceiptStatusSuccessful,
-		CumulativeGasUsed: 0,
-		Logs:              make([]*types.Log, 0),
-		TxHash:            tx.Hash(),
-		ContractAddress:   common.Address{},
-		GasUsed:           0,
+	// 使用MVCC执行交易
+	var receipt *types.Receipt
+
+	execErr := mvccManager.ExecuteTransaction(txIndex, func() error {
+		// 将交易转换为消息
+		msg, err := tx.AsMessage(types.MakeSigner(config, header.Number), header.BaseFee)
+		if err != nil {
+			return err
+		}
+
+		// 创建EVM上下文
+		blockContext := NewEVMBlockContext(header, bc, author)
+		txContext := vm.NewTxContext(msg.From(), tx.Hash(), header.Number.Uint64(), header.Time, header.BaseFee)
+		vmenv := vm.NewEVM(blockContext, txContext, statedb.GetBaseState(), config, cfg)
+
+		// 执行消息
+		result, err := ApplyMessage(vmenv, msg, gp)
+		if err != nil {
+			return err
+		}
+
+		// 更新已用Gas
+		*usedGas += result.UsedGas
+
+		// 创建收据
+		var root []byte
+		if config.IsByzantium(header.Number) {
+			statedb.GetBaseState().Finalise(true)
+		} else {
+			root = statedb.GetBaseState().IntermediateRoot(config.IsEIP158(header.Number)).Bytes()
+		}
+
+		receipt = types.NewReceipt(root, result.Failed(), *usedGas)
+		receipt.TxHash = tx.Hash()
+		receipt.GasUsed = result.UsedGas
+
+		// 如果是合约创建交易，存储创建的合约地址
+		if msg.To() == nil {
+			receipt.ContractAddress = crypto.CreateAddress(msg.From(), tx.Nonce())
+		}
+
+		// 设置日志和过滤器
+		receipt.Logs = statedb.GetBaseState().GetLogs(tx.Hash(), header.Hash())
+		receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+		receipt.BlockHash = header.Hash()
+		receipt.BlockNumber = header.Number
+		receipt.TransactionIndex = uint(txIndex)
+
+		return nil
+	})
+
+	if execErr != nil {
+		return nil, execErr
 	}
 
 	return receipt, nil
